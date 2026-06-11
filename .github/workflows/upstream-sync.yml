@@ -66,15 +66,8 @@ jobs:
           else
             conflicts=$(git diff --name-only --diff-filter=U)
             git merge --abort
-            url=$(gh issue create \
-              --title "Upstream sync conflict: $tag" \
-              --body "Merging $tag into production hit conflicts in:
-
-\`\`\`
-$conflicts
-\`\`\`
-
-Resolve locally: \`git checkout production && git merge $tag\`, fix, push.")
+            body=$(printf 'Merging %s into production hit conflicts in:\n\n```\n%s\n```\n\nResolve locally: `git checkout production && git merge %s`, fix, push.' "$tag" "$conflicts" "$tag")
+            url=$(gh issue create --title "Upstream sync conflict: $tag" --body "$body")
             echo ":warning: Upstream sync: merging **$tag** hit conflicts, manual resolution needed: $url" >> "$RUNNER_TEMP/notify.txt"
           fi
 
