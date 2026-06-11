@@ -6,7 +6,7 @@ name: Sync upstream stable release
 
 on:
   schedule:
-    - cron: "0 6 * * 1" # Mondays 06:00 UTC
+    - cron: "0 6 * * 6" # Saturdays 06:00 UTC
   workflow_dispatch: {}
 
 permissions:
@@ -57,15 +57,16 @@ jobs:
           git checkout -b "$branch"
           if git merge --no-edit "$tag"; then
             git push origin "$branch"
-            gh pr create \
+            url=$(gh pr create \
               --base production \
               --head "$branch" \
               --title "Sync upstream $tag" \
-              --body "Automated merge of upstream Mattermost $tag into production. Review and merge to deploy. Remember: upgrading runs one-way DB migrations."
+              --body "Automated merge of upstream Mattermost $tag into production. Review and merge to deploy. Remember: upgrading runs one-way DB migrations.")
+            echo ":package: Upstream sync: **$tag** is ready to review and merge: $url" >> "$RUNNER_TEMP/notify.txt"
           else
             conflicts=$(git diff --name-only --diff-filter=U)
             git merge --abort
-            gh issue create \
+            url=$(gh issue create \
               --title "Upstream sync conflict: $tag" \
               --body "Merging $tag into production hit conflicts in:
 
@@ -73,7 +74,8 @@ jobs:
 $conflicts
 \`\`\`
 
-Resolve locally: \`git checkout production && git merge $tag\`, fix, push."
+Resolve locally: \`git checkout production && git merge $tag\`, fix, push.")
+            echo ":warning: Upstream sync: merging **$tag** hit conflicts, manual resolution needed: $url" >> "$RUNNER_TEMP/notify.txt"
           fi
 
       - name: Warn when tracked line nears end-of-life
@@ -84,7 +86,21 @@ Resolve locally: \`git checkout production && git merge $tag\`, fix, push."
           if [ "$days" -lt 45 ]; then
             title="Tracked Mattermost line reaches EOL on $eol"
             if ! gh issue list --state open --search "in:title \"$title\"" --json number --jq length | grep -qv '^0$'; then
-              gh issue create --title "$title" \
-                --body "The release line in UPSTREAM_TRACK is $days days from end-of-life. Pick the next ESR, update LINE and EOL in UPSTREAM_TRACK on production, and the weekly sync will merge it."
+              url=$(gh issue create --title "$title" \
+                --body "The release line in UPSTREAM_TRACK is $days days from end-of-life. Pick the next ESR, update LINE and EOL in UPSTREAM_TRACK on production, and the weekly sync will merge it.")
+              echo ":alarm_clock: The tracked Mattermost line reaches EOL on $eol — time to pick the next ESR: $url" >> "$RUNNER_TEMP/notify.txt"
             fi
           fi
+
+      - name: Notify Mattermost
+        if: always()
+        env:
+          WEBHOOK_URL: ${{ secrets.MATTERMOST_WEBHOOK_URL }}
+        run: |
+          f="$RUNNER_TEMP/notify.txt"
+          [ -s "$f" ] || { echo "Nothing to notify."; exit 0; }
+          if [ -z "$WEBHOOK_URL" ]; then
+            echo "MATTERMOST_WEBHOOK_URL secret not set; skipping notification."
+            exit 0
+          fi
+          jq -Rs '{text: .}' < "$f" | curl -fsS -X POST -H 'Content-Type: application/json' -d @- "$WEBHOOK_URL"
