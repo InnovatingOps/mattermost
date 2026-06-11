@@ -1,0 +1,125 @@
+name: Build and deploy
+
+# Every push to `production` builds the Team Edition linux tarball (same
+# recipe as upstream Server CI) and deploys it to the production host via
+# deploy/deploy.sh. The deploy job is skipped until the DEPLOY_* secrets
+# are configured.
+
+on:
+  push:
+    branches: [production]
+  workflow_dispatch: {}
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  go-version:
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.go.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: go
+        run: echo "version=$(cat server/.go-version)" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build dist tarball
+    needs: go-version
+    runs-on: ubuntu-22.04
+    container: mattermost/mattermost-build-server:${{ needs.go-version.outputs.version }}
+    defaults:
+      run:
+        working-directory: server
+    env:
+      BUILD_NUMBER: ${{ github.run_id }}
+    outputs:
+      release: ${{ steps.meta.outputs.release }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set release name
+        id: meta
+        run: echo "release=$(date -u +%Y%m%d-%H%M)-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+          cache: "npm"
+          cache-dependency-path: "webapp/package-lock.json"
+      - name: Run setup-go-work
+        run: make setup-go-work
+      - name: Build
+        run: |
+          make config-reset
+          make build-cmd
+          make package-linux-amd64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: server/dist/*-linux-amd64.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  deploy:
+    name: Deploy to production host
+    needs: build
+    runs-on: ubuntu-22.04
+    env:
+      RELEASE: ${{ needs.build.outputs.release }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check deploy secrets
+        id: check
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          if [ -n "$DEPLOY_HOST" ] && [ -n "$DEPLOY_SSH_KEY" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::DEPLOY_HOST / DEPLOY_SSH_KEY secrets not set; build succeeded but deploy was skipped."
+          fi
+
+      - uses: actions/download-artifact@v4
+        if: steps.check.outputs.configured == 'true'
+        with:
+          name: dist
+          path: dist
+
+      - name: Deploy over SSH
+        if: steps.check.outputs.configured == 'true'
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+        run: |
+          user="${DEPLOY_USER:-root}"
+          port="${DEPLOY_PORT:-22}"
+          mkdir -p ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          opts="-i $HOME/.ssh/deploy_key -o StrictHostKeyChecking=accept-new"
+          tarball=$(ls dist/*-linux-amd64.tar.gz)
+          scp $opts -P "$port" "$tarball" deploy/deploy.sh "$user@$DEPLOY_HOST:/tmp/"
+          ssh $opts -p "$port" "$user@$DEPLOY_HOST" \
+            "bash /tmp/deploy.sh /tmp/$(basename "$tarball") '$RELEASE'"
+
+      - name: Notify Mattermost
+        if: always() && steps.check.outputs.configured == 'true'
+        env:
+          WEBHOOK_URL: ${{ secrets.MATTERMOST_WEBHOOK_URL }}
+          OUTCOME: ${{ job.status }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          [ -n "$WEBHOOK_URL" ] || { echo "No webhook secret; skipping."; exit 0; }
+          if [ "$OUTCOME" = "success" ]; then
+            msg=":rocket: Deployed **$RELEASE** to production ($RUN_URL)"
+          else
+            msg=":x: Deploy of **$RELEASE** FAILED — check the run: $RUN_URL"
+          fi
+          jq -n --arg text "$msg" '{text: $text}' | \
+            curl -fsS -X POST -H 'Content-Type: application/json' -d @- "$WEBHOOK_URL"
