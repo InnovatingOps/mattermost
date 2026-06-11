@@ -1,0 +1,7 @@
+# Upstream Mattermost release line this fork tracks.
+# Policy: stay on an Extended Support Release (ESR) line and absorb its
+# security/patch releases automatically; when the line nears end-of-life,
+# bump LINE and EOL here to the next ESR (released every February and August).
+# The upstream-sync workflow reads this file.
+LINE=11.7
+EOL=2027-05-15

@@ -1,0 +1,90 @@
+name: Sync upstream stable release
+
+# Weekly: merge the newest patch release of the tracked upstream line
+# (see UPSTREAM_TRACK) into `production` via a PR. Warns with an issue
+# when the tracked line approaches end-of-life.
+
+on:
+  schedule:
+    - cron: "0 6 * * 1" # Mondays 06:00 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    if: github.repository_owner == 'InnovatingOps'
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: production
+          fetch-depth: 0
+
+      - name: Fetch upstream tags
+        run: |
+          git config user.name "upstream-sync[bot]"
+          git config user.email "upstream-sync@users.noreply.github.com"
+          git remote add upstream https://github.com/mattermost/mattermost.git
+          git fetch upstream --tags --quiet
+
+      - name: Determine latest and merged versions on tracked line
+        id: ver
+        run: |
+          source UPSTREAM_TRACK
+          pattern="^v${LINE//./\\.}\.[0-9]+$"
+          latest=$(git tag --list "v${LINE}.*" | grep -E "$pattern" | sort -V | tail -1)
+          merged=$(git tag --merged HEAD --list "v${LINE}.*" | grep -E "$pattern" | sort -V | tail -1)
+          echo "latest=$latest"  >> "$GITHUB_OUTPUT"
+          echo "merged=$merged"  >> "$GITHUB_OUTPUT"
+          echo "eol=$EOL"        >> "$GITHUB_OUTPUT"
+          echo "Tracked line: $LINE | merged: ${merged:-none} | latest upstream: ${latest:-none}"
+
+      - name: Merge new release and open PR
+        if: steps.ver.outputs.latest != '' && steps.ver.outputs.latest != steps.ver.outputs.merged
+        run: |
+          tag="${{ steps.ver.outputs.latest }}"
+          branch="sync/$tag"
+          if git ls-remote --exit-code origin "refs/heads/$branch" >/dev/null 2>&1; then
+            echo "Sync branch $branch already exists; skipping."
+            exit 0
+          fi
+          git checkout -b "$branch"
+          if git merge --no-edit "$tag"; then
+            git push origin "$branch"
+            gh pr create \
+              --base production \
+              --head "$branch" \
+              --title "Sync upstream $tag" \
+              --body "Automated merge of upstream Mattermost $tag into production. Review and merge to deploy. Remember: upgrading runs one-way DB migrations."
+          else
+            conflicts=$(git diff --name-only --diff-filter=U)
+            git merge --abort
+            gh issue create \
+              --title "Upstream sync conflict: $tag" \
+              --body "Merging $tag into production hit conflicts in:
+
+\`\`\`
+$conflicts
+\`\`\`
+
+Resolve locally: \`git checkout production && git merge $tag\`, fix, push."
+          fi
+
+      - name: Warn when tracked line nears end-of-life
+        run: |
+          eol="${{ steps.ver.outputs.eol }}"
+          days=$(( ($(date -d "$eol" +%s) - $(date +%s)) / 86400 ))
+          echo "Tracked line EOL $eol ($days days away)"
+          if [ "$days" -lt 45 ]; then
+            title="Tracked Mattermost line reaches EOL on $eol"
+            if ! gh issue list --state open --search "in:title \"$title\"" --json number --jq length | grep -qv '^0$'; then
+              gh issue create --title "$title" \
+                --body "The release line in UPSTREAM_TRACK is $days days from end-of-life. Pick the next ESR, update LINE and EOL in UPSTREAM_TRACK on production, and the weekly sync will merge it."
+            fi
+          fi
