@@ -1,0 +1,109 @@
+# About this fork
+
+This is InnovatingOps' fork of [mattermost/mattermost](https://github.com/mattermost/mattermost).
+Its purpose is to run a self-hosted Mattermost (Team Edition, built from this
+source) with custom aesthetics on top of a stable upstream release, with
+automated upstream syncing and push-to-deploy CD. **No product code is modified
+yet** — everything the fork adds is listed below.
+
+## Branch model
+
+| Branch | Role |
+|---|---|
+| `master` | Untouched mirror of upstream `master`. Never commit here. |
+| `production` | Default branch. Based on an upstream Extended Support Release (ESR) tag plus everything in this document. All custom work (aesthetics, features) goes here, directly or via PRs. Every push deploys. |
+
+## Files added on top of upstream
+
+### `UPSTREAM_TRACK`
+Declares which upstream release line we follow (`LINE`) and its end-of-life
+date (`EOL`). We track ESR lines: upstream ships a new ESR every February and
+August, each supported ~12 months with security backports. Bumping to the next
+ESR is a deliberate one-line edit of this file (upgrades run one-way DB
+migrations, so it should never be fully automatic).
+
+### `.github/workflows/upstream-sync.yml`
+Scheduled every Saturday 06:00 UTC (also manually triggerable). It:
+1. Fetches upstream tags and finds the newest patch release on the tracked line.
+2. If it's newer than what `production` contains, merges it on a `sync/vX.Y.Z`
+   branch and opens a PR — merging that PR is the upgrade-and-deploy button.
+   On merge conflict it opens an issue instead.
+3. Opens a warning issue when the tracked line is within 45 days of EOL.
+4. Posts to the Mattermost webhook (secret `MATTERMOST_WEBHOOK_URL`) whenever
+   any of the above happened.
+
+### `.github/workflows/build-deploy.yml`
+Runs on every push to `production`:
+1. **build** — builds the Team Edition `mattermost-team-linux-amd64.tar.gz`
+   using upstream's own recipe (`mattermost/mattermost-build-server` container,
+   `make build-cmd && make package-linux-amd64`), uploads it as the `dist`
+   artifact (~390 MB, kept 7 days). Takes ~10–15 minutes.
+2. **deploy** — runs under the `production` GitHub Environment and streams the
+   tarball over SSH to the restricted `deploy` user on the production host:
+   `ssh deploy@$DEPLOY_HOST "$RELEASE" < tarball`. Skips gracefully (still
+   green) when the `DEPLOY_*` secrets are absent. Posts the outcome to the
+   Mattermost webhook. Deploys never run concurrently.
+
+Secrets (in the `production` environment): `DEPLOY_HOST`, `DEPLOY_SSH_KEY`
+(required), `DEPLOY_USER` (default `deploy`), `DEPLOY_PORT` (default 22),
+`MATTERMOST_WEBHOOK_URL` (optional, repo-level, shared with the sync workflow).
+
+### `deploy/deploy.sh`
+The upgrade procedure that runs (as root) on the server. Maintains:
+
+```
+/opt/mattermost                  -> symlink to the current release
+/opt/mattermost-releases/<name>     extracted releases (rollback targets, 5 kept)
+/opt/mattermost-shared/             config, data, logs, plugins, client-plugins
+/opt/mattermost-backups/            pre-deploy pg_dump archives (5 kept)
+```
+
+Each deploy: pg_dump backup → extract → symlink shared dirs in → stop service →
+flip `/opt/mattermost` symlink → start → health-check `/api/v4/system/ping`
+(up to 5 min) → prune. On first contact with a plain directory install it
+migrates it to this layout automatically (old install becomes release
+`initial`).
+
+**Rollback:** `ln -sfn /opt/mattermost-releases/<previous> /opt/mattermost &&
+systemctl restart mattermost`. DB migrations are one-way — when rolling back
+across versions, also restore the matching dump from `/opt/mattermost-backups`.
+
+**Note:** the copy that actually runs is pinned on the server at
+`/usr/local/sbin/mattermost-deploy.sh` (see `server-setup.sh`). Editing
+`deploy/deploy.sh` in git does **not** change production behavior until
+`server-setup.sh` is re-run on the host — a deliberate security property.
+
+### `deploy/provision.sh`
+One-shot, idempotent provisioning of a fresh Debian 13 host:
+system upgrade + unattended security updates, key-only sshd, ufw (22/80/443),
+2 GB swap if RAM < 4 GB, PostgreSQL with generated credentials (kept in
+`/root/.mattermost-db-pass`), seeds `/opt/mattermost` from a CI-built tarball
+(runs as the unprivileged `mattermost` user, systemd unit included), nginx
+reverse proxy with WebSocket support, Let's Encrypt via webroot (the TLS
+server block is written by the script, not by certbot's installer), and a
+nightly local pg_dump rotating over 7 days. Safe to re-run after partial
+failures.
+
+```
+bash provision.sh --domain chat.example.com --tarball mattermost-team-linux-amd64.tar.gz --email admin@example.com
+```
+
+### `deploy/server-setup.sh`
+One-time hardening of the deploy entry point on the host. Creates the `deploy`
+user whose SSH key is locked in `authorized_keys` with
+`restrict,command="/usr/local/sbin/mattermost-deploy"`: no shell, no scp, no
+forwarding — the key can only stream a tarball to the pinned deploy script
+(invoked through a single-command sudoers rule). Re-run it to refresh the
+pinned copy of `deploy.sh` from the `production` branch.
+
+## Day-to-day operations
+
+- **Deploy a change:** commit to `production` (or merge a PR into it) and push.
+  Live in ~15 minutes.
+- **Upstream security patch:** merge the PR the Saturday sync opens.
+- **Move to the next ESR:** edit `LINE`/`EOL` in `UPSTREAM_TRACK` when the EOL
+  warning issue appears; the next sync run merges the new line.
+- **Update deploy logic on the server:** edit `deploy/deploy.sh`, push, then
+  re-run `server-setup.sh` on the host (root).
+- **Rebuild/replace the server:** `provision.sh` + `server-setup.sh` on a fresh
+  box, point `DEPLOY_HOST` at it.
