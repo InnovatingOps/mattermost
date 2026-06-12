@@ -98,6 +98,42 @@ in `/etc/restic/env` (Backblaze B2 recommended). Run once to get the config
 template, fill it in, run again to initialize and enable. **The encryption
 key `/etc/restic/repo-password` must be copied somewhere safe off the server.**
 
+#### Restoring from backup
+
+Every restic command needs the repo credentials in the environment first:
+
+```
+set -a; . /etc/restic/env; set +a
+restic snapshots          # each backup run leaves two: tag `db` and tag `files`
+```
+
+Restore files (uploads + config) and the database dump:
+
+```
+restic restore latest --tag files --target /tmp/restore
+restic dump latest --tag db /mattermost.sql > /tmp/restore/mattermost.sql
+```
+
+The files land under `/tmp/restore/opt/mattermost-shared/...`; copy what you
+need back into place (`chown -R mattermost:mattermost` after). To load the
+database, stop Mattermost first, then:
+
+```
+sudo -u postgres dropdb mattermost && sudo -u postgres createdb mattermost -O mmuser
+sudo -u postgres psql -q -d mattermost -f /tmp/restore/mattermost.sql
+```
+
+**Total server loss:** provision a fresh box (`provision.sh` + `server-setup.sh`
+below), recreate `/etc/restic/env` with the bucket credentials and the saved
+repo password, then restore as above and switch DNS. Nothing on the old box is
+needed — which is the point.
+
+**Restore drill** (verified 2026-06-12 — repeat occasionally, it's
+non-destructive): restore files to `/tmp/restore-test` and `diff -r` against
+the live `data/` dir; load the SQL dump into a scratch DB
+(`createdb restore_drill -O mmuser`), sanity-check row counts in `users` /
+`posts` / `channels`, then `dropdb restore_drill` and remove `/tmp/restore-test`.
+
 ### `deploy/server-setup.sh`
 One-time hardening of the deploy entry point on the host. Creates the `deploy`
 user whose SSH key is locked in `authorized_keys` with
