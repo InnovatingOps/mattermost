@@ -150,9 +150,44 @@ done
 [ -n "$healthy" ] || { journalctl -u mattermost -n 50 --no-pager; fail "Mattermost did not become healthy"; }
 
 # --- Phase 4: nginx reverse proxy + TLS ---
-if [ ! -f /etc/nginx/sites-available/mattermost ]; then
-    log "Configuring nginx for $DOMAIN"
-    cat >/etc/nginx/sites-available/mattermost <<EOF
+# We write the TLS server block ourselves and renew via webroot, instead of
+# relying on certbot's nginx installer (its config parser is unreliable).
+WEBROOT=/var/www/letsencrypt
+CERT_DIR=/etc/letsencrypt/live/$DOMAIN
+mkdir -p "$WEBROOT"
+
+cat >/etc/nginx/snippets/mattermost-proxy.conf <<'EOF'
+client_max_body_size 100M;
+
+location ~ /api/v[0-9]+/(users/)?websocket$ {
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection $connection_upgrade;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_buffers 256 16k;
+    proxy_read_timeout 600s;
+    proxy_http_version 1.1;
+    proxy_pass http://mattermost_backend;
+}
+
+location / {
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header Connection "";
+    proxy_buffers 256 16k;
+    proxy_read_timeout 600s;
+    proxy_http_version 1.1;
+    proxy_pass http://mattermost_backend;
+}
+EOF
+
+write_site_config() { # arg: "plain" (pre-cert) or "tls"
+    {
+        cat <<EOF
 upstream mattermost_backend {
     server 127.0.0.1:8065;
     keepalive 64;
@@ -168,48 +203,74 @@ server {
     listen [::]:80;
     server_name $DOMAIN;
 
-    client_max_body_size 100M;
-
-    location ~ /api/v[0-9]+/(users/)?websocket\$ {
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection \$connection_upgrade;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_buffers 256 16k;
-        proxy_read_timeout 600s;
-        proxy_http_version 1.1;
-        proxy_pass http://mattermost_backend;
+    location /.well-known/acme-challenge/ {
+        root $WEBROOT;
     }
+EOF
+        if [ "$1" = tls ]; then
+            cat <<EOF
 
     location / {
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_set_header Connection "";
-        proxy_buffers 256 16k;
-        proxy_read_timeout 600s;
-        proxy_http_version 1.1;
-        proxy_pass http://mattermost_backend;
+        return 301 https://\$host\$request_uri;
     }
 }
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name $DOMAIN;
+
+    ssl_certificate $CERT_DIR/fullchain.pem;
+    ssl_certificate_key $CERT_DIR/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers off;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 1d;
+
+    include snippets/mattermost-proxy.conf;
+}
 EOF
+        else
+            cat <<'EOF'
+
+    include snippets/mattermost-proxy.conf;
+}
+EOF
+        fi
+    } >/etc/nginx/sites-available/mattermost
     ln -sf /etc/nginx/sites-available/mattermost /etc/nginx/sites-enabled/mattermost
     rm -f /etc/nginx/sites-enabled/default
     nginx -t
     systemctl reload nginx
-fi
+}
 
-if [ ! -d "/etc/letsencrypt/live/$DOMAIN" ]; then
-    log "Requesting Let's Encrypt certificate for $DOMAIN"
+if [ ! -d "$CERT_DIR" ]; then
+    log "Requesting Let's Encrypt certificate for $DOMAIN (webroot)"
+    write_site_config plain
     email_args=(--register-unsafely-without-email)
     [ -n "$EMAIL" ] && email_args=(-m "$EMAIL")
-    if ! certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos --redirect "${email_args[@]}"; then
+    if ! certbot certonly --webroot -w "$WEBROOT" -d "$DOMAIN" --non-interactive --agree-tos "${email_args[@]}"; then
         echo "[provision] WARNING: certbot failed (DNS not pointing here yet?)." \
-             "Fix DNS and re-run this script; everything else is done."
+             "Site is HTTP-only for now; fix DNS and re-run this script."
     fi
+fi
+
+if [ -d "$CERT_DIR" ]; then
+    # A previous run may have registered the cert with the nginx authenticator/
+    # installer; convert renewals to webroot so they never parse nginx config.
+    renew_conf=/etc/letsencrypt/renewal/$DOMAIN.conf
+    if grep -q 'authenticator = nginx' "$renew_conf" 2>/dev/null; then
+        sed -i -e 's/authenticator = nginx/authenticator = webroot/' \
+               -e '/installer = nginx/d' "$renew_conf"
+        grep -q 'webroot_map' "$renew_conf" || \
+            printf '[[webroot_map]]\n%s = %s\n' "$DOMAIN" "$WEBROOT" >>"$renew_conf"
+    fi
+    mkdir -p /etc/letsencrypt/renewal-hooks/deploy
+    printf '#!/bin/sh\nsystemctl reload nginx\n' >/etc/letsencrypt/renewal-hooks/deploy/nginx-reload
+    chmod 755 /etc/letsencrypt/renewal-hooks/deploy/nginx-reload
+    log "Enabling HTTPS server block"
+    write_site_config tls
 fi
 
 # --- Phase 5: nightly local DB backup (off-box backup is a separate, later step) ---
