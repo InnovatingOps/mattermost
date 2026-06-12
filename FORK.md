@@ -88,6 +88,16 @@ failures.
 bash provision.sh --domain chat.example.com --tarball mattermost-team-linux-amd64.tar.gz --email admin@example.com
 ```
 
+### `deploy/backup-setup.sh`
+Sets up nightly encrypted off-box backups with restic + a systemd timer
+(04:15). Each run backs up a fresh `pg_dump`, `/opt/mattermost-shared/data`
+(file uploads) and `/opt/mattermost-shared/config`, applies 7-daily/4-weekly/
+6-monthly retention, spot-checks 1% of repository data, and notifies the
+Mattermost webhook on failure. Backend is any S3-compatible bucket configured
+in `/etc/restic/env` (Backblaze B2 recommended). Run once to get the config
+template, fill it in, run again to initialize and enable. **The encryption
+key `/etc/restic/repo-password` must be copied somewhere safe off the server.**
+
 ### `deploy/server-setup.sh`
 One-time hardening of the deploy entry point on the host. Creates the `deploy`
 user whose SSH key is locked in `authorized_keys` with
