@@ -66,11 +66,10 @@ jobs:
     name: Deploy to production host
     needs: build
     runs-on: ubuntu-22.04
+    environment: production
     env:
       RELEASE: ${{ needs.build.outputs.release }}
     steps:
-      - uses: actions/checkout@v4
-
       - name: Check deploy secrets
         id: check
         env:
@@ -98,16 +97,14 @@ jobs:
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
           DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
         run: |
-          user="${DEPLOY_USER:-root}"
+          user="${DEPLOY_USER:-deploy}"
           port="${DEPLOY_PORT:-22}"
           mkdir -p ~/.ssh
           printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          opts="-i $HOME/.ssh/deploy_key -o StrictHostKeyChecking=accept-new"
           tarball=$(ls dist/*-linux-amd64.tar.gz)
-          scp $opts -P "$port" "$tarball" deploy/deploy.sh "$user@$DEPLOY_HOST:/tmp/"
-          ssh $opts -p "$port" "$user@$DEPLOY_HOST" \
-            "bash /tmp/deploy.sh /tmp/$(basename "$tarball") '$RELEASE'"
+          ssh -i ~/.ssh/deploy_key -p "$port" -o StrictHostKeyChecking=accept-new \
+            "$user@$DEPLOY_HOST" "$RELEASE" < "$tarball"
 
       - name: Notify Mattermost
         if: always() && steps.check.outputs.configured == 'true'
