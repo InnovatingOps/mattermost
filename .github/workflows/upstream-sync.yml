@@ -58,6 +58,7 @@ jobs:
           if git merge --no-edit "$tag"; then
             git push origin "$branch"
             url=$(gh pr create \
+              --repo "$GITHUB_REPOSITORY" \
               --base production \
               --head "$branch" \
               --title "Sync upstream $tag" \
@@ -67,7 +68,7 @@ jobs:
             conflicts=$(git diff --name-only --diff-filter=U)
             git merge --abort
             body=$(printf 'Merging %s into production hit conflicts in:\n\n```\n%s\n```\n\nResolve locally: `git checkout production && git merge %s`, fix, push.' "$tag" "$conflicts" "$tag")
-            url=$(gh issue create --title "Upstream sync conflict: $tag" --body "$body")
+            url=$(gh issue create --repo "$GITHUB_REPOSITORY" --title "Upstream sync conflict: $tag" --body "$body")
             echo ":warning: Upstream sync: merging **$tag** hit conflicts, manual resolution needed: $url" >> "$RUNNER_TEMP/notify.txt"
           fi
 
@@ -78,8 +79,8 @@ jobs:
           echo "Tracked line EOL $eol ($days days away)"
           if [ "$days" -lt 45 ]; then
             title="Tracked Mattermost line reaches EOL on $eol"
-            if ! gh issue list --state open --search "in:title \"$title\"" --json number --jq length | grep -qv '^0$'; then
-              url=$(gh issue create --title "$title" \
+            if ! gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "in:title \"$title\"" --json number --jq length | grep -qv '^0$'; then
+              url=$(gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" \
                 --body "The release line in UPSTREAM_TRACK is $days days from end-of-life. Pick the next ESR, update LINE and EOL in UPSTREAM_TRACK on production, and the weekly sync will merge it.")
               echo ":alarm_clock: The tracked Mattermost line reaches EOL on $eol — time to pick the next ESR: $url" >> "$RUNNER_TEMP/notify.txt"
             fi
