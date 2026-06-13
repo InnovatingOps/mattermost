@@ -91,12 +91,18 @@ bash provision.sh --domain chat.example.com --tarball mattermost-team-linux-amd6
 ### `deploy/backup-setup.sh`
 Sets up nightly encrypted off-box backups with restic + a systemd timer
 (04:15). Each run backs up a fresh `pg_dump`, `/opt/mattermost-shared/data`
-(file uploads) and `/opt/mattermost-shared/config`, applies 7-daily/4-weekly/
-6-monthly retention, spot-checks 1% of repository data, and notifies the
-Mattermost webhook on failure. Backend is any S3-compatible bucket configured
-in `/etc/restic/env` (Backblaze B2 recommended). Run once to get the config
+and `/opt/mattermost-shared/config`, applies 7-daily/4-weekly/6-monthly
+retention, spot-checks 1% of repository data, and notifies the Mattermost
+webhook on failure. Backend is any S3-compatible bucket configured in
+`/etc/restic/env` (Backblaze B2 recommended). Run once to get the config
 template, fill it in, run again to initialize and enable. **The encryption
 key `/etc/restic/repo-password` must be copied somewhere safe off the server.**
+
+When file uploads live in Cloudflare R2 (see "File storage" below), the same
+nightly run also mirrors the live R2 bucket to a second B2 bucket with rclone:
+`current/` is an exact copy, and anything deleted or overwritten in R2 is
+retained 30 days under `deleted/<date>/`. Enabled by filling the `R2_*` /
+`B2_MIRROR_*` block in `/etc/restic/env` and re-running `backup-setup.sh`.
 
 #### Restoring from backup
 
@@ -141,6 +147,29 @@ user whose SSH key is locked in `authorized_keys` with
 forwarding — the key can only stream a tarball to the pinned deploy script
 (invoked through a single-command sudoers rule). Re-run it to refresh the
 pinned copy of `deploy.sh` from the `production` branch.
+
+## File storage (Cloudflare R2)
+
+File uploads are stored in a Cloudflare R2 bucket via Mattermost's native S3
+driver, not on local disk — `/opt/mattermost-shared/data` is only a legacy
+location. Configured in System Console → Environment → File Storage (lands in
+`FileSettings` of `config.json`, which restic backs up):
+
+| Setting | Value |
+|---|---|
+| File Storage System | Amazon S3 |
+| Amazon S3 Bucket | the R2 bucket name |
+| Amazon S3 Region | `auto` |
+| Amazon S3 Endpoint | `<ACCOUNT_ID>.r2.cloudflarestorage.com` |
+| Access Key / Secret | from an R2 API token scoped to that bucket (Object Read & Write) |
+| Enable Secure Connections | true |
+
+Rationale: object storage is ~$1.35/month per 100 GB (vs $18/month minimum for
+Vultr Object Storage or slow HDD block storage), R2 egress is free, and the
+server's NVMe stays reserved for Postgres. Users never talk to R2 — Mattermost
+proxies all file traffic. Backup: nightly rclone mirror to B2 (see
+`backup-setup.sh` above). Migrating an existing local `data/` dir into the
+bucket is a plain `rclone copy` — the on-disk layout maps 1:1 to S3 keys.
 
 ## Day-to-day operations
 
