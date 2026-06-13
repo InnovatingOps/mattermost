@@ -12,11 +12,14 @@ bottom — each phase gates the next.
 The new box runs v11.7.2; the real data is from ~v11.4. Prove the one-way
 schema migration succeeds and is fast **before** the live window.
 
-- [ ] On the **old box**, take a fresh dump: `pg_dump --dbname="$DSN" | gzip > /root/prod-rehearsal.sql.gz`
-- [ ] Copy it to the test box (or pull from the nightly dump already on disk)
-- [ ] On the **test box**, load it into a scratch DB:
+- [ ] On the **old box**, take a fresh dump — `--no-owner --no-privileges` is
+      required, else the restore fails on the old DB's role (e.g. `source`):
+      `pg_dump --no-owner --no-privileges --dbname="$DSN" | gzip > /root/prod-rehearsal.sql.gz`
+- [ ] Copy it to the test box
+- [ ] On the **test box**, load it into a scratch DB. The `SET SESSION AUTHORIZATION`
+      makes `mmuser` own the tables (so its migrations can alter them) — no password needed:
       `sudo -u postgres createdb mm_rehearsal -O mmuser`
-      `zcat prod-rehearsal.sql.gz | sudo -u postgres psql -q -d mm_rehearsal`
+      `(echo "SET SESSION AUTHORIZATION mmuser;"; zcat prod-rehearsal.sql.gz) | sudo -u postgres psql -q -d mm_rehearsal`
 - [ ] Point a throwaway Mattermost config at `mm_rehearsal`, start it, and
       **watch the migration run** — note how long it takes
 - [ ] Confirm healthy (`/api/v4/system/ping`) and spot-check that real channels,
@@ -61,7 +64,9 @@ schema migration succeeds and is fast **before** the live window.
 
 - [ ] **Final backup of the old box** (DB dump + confirm a restic snapshot exists)
 - [ ] **Stop the old Mattermost** (`systemctl stop mattermost`) — begins downtime
-- [ ] **Final DB dump** from old box → **restore** onto the new box's `mattermost` DB
+- [ ] **Final DB dump** from old box (`pg_dump --no-owner --no-privileges`) →
+      **restore** onto the new box's `mattermost` DB the same way as the
+      Phase 0.1 rehearsal (`SET SESSION AUTHORIZATION mmuser` so `mmuser` owns the tables)
 - [ ] **Second `rclone copy` pass** (same command as Phase 1) — only the files
       uploaded since the first pass; finishes in seconds
 - [ ] On the new box, switch to the real domain:
