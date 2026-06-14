@@ -33,7 +33,7 @@ describe('ProductBrandingFreeEdition', () => {
         expect(logoElement).toBeInTheDocument();
     });
 
-    test('should show TEAM EDITION for unlicensed', () => {
+    test('should show no badge for unlicensed (Team Edition)', () => {
         const state = {
             entities: {
                 general: {
@@ -50,7 +50,7 @@ describe('ProductBrandingFreeEdition', () => {
             state,
         );
 
-        expect(screen.getByText('TEAM EDITION')).toBeInTheDocument();
+        expect(screen.queryByText('TEAM EDITION')).not.toBeInTheDocument();
         const logoElement = container.querySelector('svg');
         expect(logoElement).toBeInTheDocument();
     });
