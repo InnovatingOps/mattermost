@@ -1,9 +1,9 @@
 name: Build and deploy
 
-# Every push to `production` builds the Team Edition linux tarball (same
-# recipe as upstream Server CI) and deploys it to the production host via
-# deploy/deploy.sh. The deploy job is skipped until the DEPLOY_* secrets
-# are configured.
+# Every push to `production` runs the webapp test suite, then builds the
+# Team Edition linux tarball (same recipe as upstream Server CI) and deploys
+# it to the production host via deploy/deploy.sh. The build is gated on tests
+# passing; the deploy job is skipped until the DEPLOY_* secrets are configured.
 
 on:
   push:
@@ -24,9 +24,24 @@ jobs:
       - id: go
         run: echo "version=$(cat server/.go-version)" >> "$GITHUB_OUTPUT"
 
+  test:
+    name: Run webapp tests
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: webapp
+    steps:
+      - uses: actions/checkout@v4
+      - name: ci/setup
+        uses: ./.github/actions/webapp-setup
+      - name: ci/test
+        env:
+          NODE_OPTIONS: --max_old_space_size=5120
+        run: npm run test
+
   build:
     name: Build dist tarball
-    needs: go-version
+    needs: [go-version, test]
     runs-on: ubuntu-22.04
     container: mattermost/mattermost-build-server:${{ needs.go-version.outputs.version }}
     defaults:
