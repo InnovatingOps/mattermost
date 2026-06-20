@@ -2177,6 +2177,10 @@
     "translation": "Unable to seek to file start."
   },
   {
+    "id": "api.emoji.upload.too_many_frames.app_error",
+    "translation": "Unable to create emoji. Animated GIF must have at most {{.MaxFrames}} frames."
+  },
+  {
     "id": "api.encoding_error",
     "translation": "Encountered an error encoding JSON for the API response"
   },
@@ -10855,6 +10859,10 @@
   {
     "id": "model.config.is_valid.export.retention_days_too_low.app_error",
     "translation": "Invalid value for RetentionDays. Value should be greater than 0"
+  },
+  {
+    "id": "model.config.is_valid.extract_content_timeout.app_error",
+    "translation": "Invalid content extraction timeout for file settings. Must be a whole number of seconds greater than or equal to zero."
   },
   {
     "id": "model.config.is_valid.file_driver.app_error",
