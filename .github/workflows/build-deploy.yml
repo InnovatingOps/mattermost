@@ -1,9 +1,12 @@
-name: Build and deploy
+name: Build
 
 # Every push to `production` runs the webapp test suite, then builds the
-# Team Edition linux tarball (same recipe as upstream Server CI) and deploys
-# it to the production host via deploy/deploy.sh. The build is gated on tests
-# passing; the deploy job is skipped until the DEPLOY_* secrets are configured.
+# Team Edition linux tarball (same recipe as upstream Server CI) and uploads
+# it as the `dist` artifact. The build is gated on tests passing.
+#
+# Deployment is deliberately manual: download the artifact and install it on
+# the host yourself (deploy/deploy.sh still runs there, pinned by
+# deploy/server-setup.sh). The automated SSH deploy job was removed.
 
 on:
   push:
@@ -11,7 +14,7 @@ on:
   workflow_dispatch: {}
 
 concurrency:
-  group: deploy-production
+  group: build-production
   cancel-in-progress: false
 
 jobs:
@@ -76,63 +79,3 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
-
-  deploy:
-    name: Deploy to production host
-    needs: build
-    runs-on: ubuntu-22.04
-    environment: production
-    env:
-      RELEASE: ${{ needs.build.outputs.release }}
-    steps:
-      - name: Check deploy secrets
-        id: check
-        env:
-          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
-        run: |
-          if [ -n "$DEPLOY_HOST" ] && [ -n "$DEPLOY_SSH_KEY" ]; then
-            echo "configured=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "configured=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::DEPLOY_HOST / DEPLOY_SSH_KEY secrets not set; build succeeded but deploy was skipped."
-          fi
-
-      - uses: actions/download-artifact@v4
-        if: steps.check.outputs.configured == 'true'
-        with:
-          name: dist
-          path: dist
-
-      - name: Deploy over SSH
-        if: steps.check.outputs.configured == 'true'
-        env:
-          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
-          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
-          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
-        run: |
-          user="${DEPLOY_USER:-deploy}"
-          port="${DEPLOY_PORT:-22}"
-          mkdir -p ~/.ssh
-          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
-          tarball=$(ls dist/*-linux-amd64.tar.gz)
-          ssh -i ~/.ssh/deploy_key -p "$port" -o StrictHostKeyChecking=accept-new \
-            "$user@$DEPLOY_HOST" "$RELEASE" < "$tarball"
-
-      - name: Notify Mattermost
-        if: always() && steps.check.outputs.configured == 'true'
-        env:
-          WEBHOOK_URL: ${{ secrets.MATTERMOST_WEBHOOK_URL }}
-          OUTCOME: ${{ job.status }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          [ -n "$WEBHOOK_URL" ] || { echo "No webhook secret; skipping."; exit 0; }
-          if [ "$OUTCOME" = "success" ]; then
-            msg=":rocket: Deployed **$RELEASE** to production ($RUN_URL)"
-          else
-            msg=":x: Deploy of **$RELEASE** FAILED — check the run: $RUN_URL"
-          fi
-          jq -n --arg text "$msg" '{text: $text}' | \
-            curl -fsS -X POST -H 'Content-Type: application/json' -d @- "$WEBHOOK_URL"

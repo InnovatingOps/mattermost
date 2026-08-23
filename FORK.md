@@ -48,15 +48,28 @@ Runs on every push to `production`:
    using upstream's own recipe (`mattermost/mattermost-build-server` container,
    `make build-cmd && make package-linux-amd64`), uploads it as the `dist`
    artifact (~390 MB, kept 7 days). Takes ~10–15 minutes.
-2. **deploy** — runs under the `production` GitHub Environment and streams the
-   tarball over SSH to the restricted `deploy` user on the production host:
-   `ssh deploy@$DEPLOY_HOST "$RELEASE" < tarball`. Skips gracefully (still
-   green) when the `DEPLOY_*` secrets are absent. Posts the outcome to the
-   Mattermost webhook. Deploys never run concurrently.
 
-Secrets (in the `production` environment): `DEPLOY_HOST`, `DEPLOY_SSH_KEY`
-(required), `DEPLOY_USER` (default `deploy`), `DEPLOY_PORT` (default 22),
-`MATTERMOST_WEBHOOK_URL` (optional, repo-level, shared with the sync workflow).
+**Deployment is manual.** CI builds and stops; it never touches a server. The
+build job still computes a release name (`<UTC-date>-<short-sha>`, visible in
+the run log) — reuse it when you install, so `/opt/mattermost-releases/` keeps
+matching the commit it came from.
+
+To ship a build:
+
+```
+gh run download <run-id> --repo InnovatingOps/mattermost --name dist
+ssh deploy@<host> '<release-name>' < mattermost-team-linux-amd64.tar.gz
+```
+
+That is the same restricted entry point the old CI job used — the `deploy`
+user's forced command still pins `deploy.sh` on the host (see
+`deploy/server-setup.sh`), so the on-server upgrade path is unchanged.
+
+Secrets: `MATTERMOST_WEBHOOK_URL` (optional, repo-level, shared with the sync
+workflow). The `production` GitHub Environment and its `DEPLOY_HOST` /
+`DEPLOY_SSH_KEY` / `DEPLOY_USER` / `DEPLOY_PORT` secrets are no longer read by
+any workflow; they are kept only so automated deploys can be restored by
+re-adding the job.
 
 ### `deploy/deploy.sh`
 The upgrade procedure that runs (as root) on the server. Maintains:
@@ -184,7 +197,8 @@ bucket is a plain `rclone copy` — the on-disk layout maps 1:1 to S3 keys.
 ## Day-to-day operations
 
 - **Deploy a change:** commit to `production` (or merge a PR into it) and push.
-  Live in ~15 minutes.
+  CI builds the tarball in ~15 minutes; download the `dist` artifact and
+  install it on the host yourself (see `build-deploy.yml` above).
 - **Upstream security patch:** merge the PR the Saturday sync opens.
 - **Move to the next ESR:** edit `LINE`/`EOL` in `UPSTREAM_TRACK` when the EOL
   warning issue appears; the next sync run merges the new line.
