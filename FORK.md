@@ -32,6 +32,16 @@ Scheduled every Saturday 06:00 UTC (also manually triggerable). It:
 4. Posts to the Mattermost webhook (secret `MATTERMOST_WEBHOOK_URL`) whenever
    any of the above happened.
 
+Secrets: `MATTERMOST_WEBHOOK_URL` (optional) and `SYNC_TOKEN` (**required in
+practice**). GitHub refuses any push from the built-in `GITHUB_TOKEN` that
+creates or updates files under `.github/workflows/**`, and upstream releases
+touch those files routinely — so without `SYNC_TOKEN` the sync silently stops
+working the first time a release includes a workflow change (it did, at
+v11.7.7; v11.7.9 had to be merged by hand). `SYNC_TOKEN` is a fine-grained or
+classic PAT with the `workflow` scope plus write access to this repo. The same
+restriction applies locally: push workflow changes over the SSH remote, since
+the `gh` OAuth token lacks `workflow`.
+
 ### `.github/workflows/build-deploy.yml`
 Runs on every push to `production`:
 1. **build** — builds the Team Edition `mattermost-team-linux-amd64.tar.gz`

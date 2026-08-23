@@ -19,12 +19,24 @@ jobs:
     runs-on: ubuntu-latest
     if: github.repository_owner == 'InnovatingOps'
     env:
-      GH_TOKEN: ${{ github.token }}
+      # GITHUB_TOKEN is refused by GitHub when a push creates or updates files
+      # under .github/workflows/**, and upstream releases touch them routinely
+      # (this is what broke the v11.7.9 sync). SYNC_TOKEN is a PAT carrying the
+      # `workflow` scope; it falls back to github.token so the EOL-warning and
+      # notification steps still work when the secret is absent.
+      GH_TOKEN: ${{ secrets.SYNC_TOKEN || github.token }}
+      HAS_SYNC_TOKEN: ${{ secrets.SYNC_TOKEN != '' }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: production
           fetch-depth: 0
+          token: ${{ secrets.SYNC_TOKEN || github.token }}
+
+      - name: Warn when SYNC_TOKEN is absent
+        run: |
+          [ "$HAS_SYNC_TOKEN" = "true" ] && exit 0
+          echo "::warning::SYNC_TOKEN secret is not set. The sync push will be rejected if this upstream release touches .github/workflows/**."
 
       - name: Fetch upstream tags
         run: |
@@ -56,7 +68,10 @@ jobs:
           fi
           git checkout -b "$branch"
           if git merge --no-edit "$tag"; then
-            git push origin "$branch"
+            if ! git push origin "$branch"; then
+              printf ':x: Upstream sync: **%s** merged cleanly but the push of `%s` was rejected. If the rejection mentions `.github/workflows`, set the SYNC_TOKEN secret to a PAT with the `workflow` scope.\n' "$tag" "$branch" >> "$RUNNER_TEMP/notify.txt"
+              exit 1
+            fi
             url=$(gh pr create \
               --repo "$GITHUB_REPOSITORY" \
               --base production \
