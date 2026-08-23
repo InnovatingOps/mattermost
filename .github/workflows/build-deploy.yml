@@ -1,12 +1,14 @@
 name: Build
 
 # Every push to `production` runs the webapp test suite, then builds the
-# Team Edition linux tarball (same recipe as upstream Server CI) and uploads
-# it as the `dist` artifact. The build is gated on tests passing.
+# Team Edition linux tarball (same recipe as upstream Server CI) and publishes
+# it as a GitHub release, tagged `build-<UTC-date>-<short-sha>`. The same
+# tarball is kept for 7 days as the `dist` artifact for debugging. The build is
+# gated on tests passing.
 #
-# Deployment is deliberately manual: download the artifact and install it on
-# the host yourself (deploy/deploy.sh still runs there, pinned by
-# deploy/server-setup.sh). The automated SSH deploy job was removed.
+# Deployment is deliberately manual: the repo is public, so the host can fetch
+# the release asset directly and install it (deploy/deploy.sh still runs there,
+# pinned by deploy/server-setup.sh). The automated SSH deploy job was removed.
 
 on:
   push:
@@ -16,6 +18,9 @@ on:
 concurrency:
   group: build-production
   cancel-in-progress: false
+
+permissions:
+  contents: read
 
 jobs:
   go-version:
@@ -79,3 +84,27 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
+
+  release:
+    name: Publish release
+    needs: [build]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      # The tag is prefixed `build-` on purpose: `v*` belongs to upstream, whose
+      # release tags land here through the sync workflow's merges.
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: build-${{ needs.build.outputs.release }}
+        run: |
+          gh release create "$TAG" dist/*-linux-amd64.tar.gz \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "$TAG" \
+            --generate-notes

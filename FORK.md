@@ -48,16 +48,20 @@ Runs on every push to `production`:
    using upstream's own recipe (`mattermost/mattermost-build-server` container,
    `make build-cmd && make package-linux-amd64`), uploads it as the `dist`
    artifact (~390 MB, kept 7 days). Takes ~10–15 minutes.
+2. **release** — publishes that tarball as a GitHub release tagged
+   `build-<UTC-date>-<short-sha>`. Unlike the artifact it never expires, and
+   the repo is public, so the asset downloads without a token. The `build-`
+   prefix keeps these clear of `v*`, which is upstream's tag namespace and
+   arrives here through the sync workflow's merges.
 
-**Deployment is manual.** CI builds and stops; it never touches a server. The
-build job still computes a release name (`<UTC-date>-<short-sha>`, visible in
-the run log) — reuse it when you install, so `/opt/mattermost-releases/` keeps
-matching the commit it came from.
+**Deployment is manual.** CI builds and stops; it never touches a server. Reuse
+the release tag's `<UTC-date>-<short-sha>` portion as the release name when you
+install, so `/opt/mattermost-releases/` keeps matching the commit it came from.
 
 To ship a build:
 
 ```
-gh run download <run-id> --repo InnovatingOps/mattermost --name dist
+curl -LO https://github.com/InnovatingOps/mattermost/releases/latest/download/mattermost-team-linux-amd64.tar.gz
 ssh deploy@<host> '<release-name>' < mattermost-team-linux-amd64.tar.gz
 ```
 
@@ -197,8 +201,9 @@ bucket is a plain `rclone copy` — the on-disk layout maps 1:1 to S3 keys.
 ## Day-to-day operations
 
 - **Deploy a change:** commit to `production` (or merge a PR into it) and push.
-  CI builds the tarball in ~15 minutes; download the `dist` artifact and
-  install it on the host yourself (see `build-deploy.yml` above).
+  CI builds the tarball in ~15 minutes and publishes it as a `build-*` release;
+  download that asset and install it on the host yourself (see
+  `build-deploy.yml` above).
 - **Upstream security patch:** merge the PR the Saturday sync opens.
 - **Move to the next ESR:** edit `LINE`/`EOL` in `UPSTREAM_TRACK` when the EOL
   warning issue appears; the next sync run merges the new line.
