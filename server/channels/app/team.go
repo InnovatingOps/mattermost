@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"image"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -1283,8 +1282,8 @@ func (a *App) LeaveTeam(rctx request.CTX, team *model.Team, user *model.User, re
 	for _, channel := range channelList {
 		if !channel.IsGroupOrDirect() {
 			a.invalidateCacheForChannelMembers(channel.Id)
-			if nErr = a.Srv().Store().Channel().RemoveMember(rctx, channel.Id, user.Id); nErr != nil {
-				return model.NewAppError("LeaveTeam", "app.channel.remove_member.app_error", nil, "", http.StatusInternalServerError).Wrap(nErr)
+			if appErr := a.removeChannelMembership(rctx, user.Id, channel.Id, "LeaveTeam"); appErr != nil {
+				return appErr
 			}
 		}
 	}
@@ -2032,8 +2031,10 @@ func (a *App) SetTeamIconFromMultiPartFile(rctx request.CTX, teamID string, file
 }
 
 func (a *App) SetTeamIconFromFile(rctx request.CTX, team *model.Team, file io.ReadSeeker) *model.AppError {
-	// Decode image into Image object
-	img, format, err := image.Decode(file)
+	// Decode image into Image object using the shared decoder so team icons
+	// are subject to the same concurrency and resolution safeguards as other
+	// user-uploaded images.
+	img, format, err := a.ch.imgDecoder.Decode(file)
 	if err != nil {
 		return model.NewAppError("SetTeamIcon", "api.team.set_team_icon.decode.app_error", nil, "", http.StatusBadRequest).Wrap(err)
 	}

@@ -17,6 +17,7 @@ import (
 
 	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/mattermost/mattermost/server/public/plugin"
+	"github.com/mattermost/mattermost/server/public/shared/markdown"
 	"github.com/mattermost/mattermost/server/public/shared/mlog"
 	"github.com/mattermost/mattermost/server/v8/channels/app/featureflag"
 	"github.com/mattermost/mattermost/server/v8/channels/jobs"
@@ -107,6 +108,13 @@ type PlatformService struct {
 	goroutineExitSignal chan struct{}
 	goroutineBuffered   chan struct{}
 
+	// Document content extraction runs on a dedicated, bounded worker pool so
+	// that expensive extractions cannot saturate the generic worker pool and
+	// block the request goroutines that dispatch them.
+	extractionQueue chan func()
+	extractionStop  chan struct{}
+	extractionWG    sync.WaitGroup
+
 	additionalClusterHandlers map[model.ClusterEvent]einterfaces.ClusterMessageHandler
 
 	shareChannelServiceMux sync.RWMutex
@@ -152,6 +160,8 @@ func New(sc ServiceConfig, options ...Option) (*PlatformService, error) {
 		hashSeed:            maphash.MakeSeed(),
 		goroutineExitSignal: make(chan struct{}, 1),
 		goroutineBuffered:   make(chan struct{}, runtime.NumCPU()),
+		extractionQueue:     make(chan func(), runtime.NumCPU()),
+		extractionStop:      make(chan struct{}),
 		WebSocketRouter: &WebSocketRouter{
 			handlers: make(map[string]webSocketHandler),
 		},
@@ -319,6 +329,10 @@ func New(sc ServiceConfig, options ...Option) (*PlatformService, error) {
 		return nil, fmt.Errorf("cannot create store: %w", err)
 	}
 
+	// The markdown package needs to know what the maximum post size is, so we
+	// let it know once the store is created.
+	markdown.SetMaxPostRunes(ps.MaxPostSize())
+
 	// Step 7: initialize status and session cache.
 	// We need to do this because ps.LoadLicense() called in step 8, could
 	// end up calling InvalidateAllCaches, so the status and session caches
@@ -438,6 +452,8 @@ func New(sc ServiceConfig, options ...Option) (*PlatformService, error) {
 	ps.searchConfigListenerId = searchConfigListenerId
 	ps.searchLicenseListenerId = searchLicenseListenerId
 
+	ps.startExtractionWorkers()
+
 	return ps, nil
 }
 
@@ -553,6 +569,10 @@ func (ps *PlatformService) Shutdown() error {
 	<-ps.statusUpdateDoneSignal
 
 	ps.RemoveLicenseListener(ps.licenseListenerId)
+
+	// Stop the document extraction workers and wait for any in-flight
+	// extraction to finish before closing the store it depends on.
+	ps.stopExtractionWorkers()
 
 	// we need to wait the goroutines to finish before closing the store
 	// and this needs to be called after hub stop because hub generates goroutines
